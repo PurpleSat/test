@@ -882,7 +882,7 @@ const GroupEditor = ({
               </button>
             </div>
           </div>
-          <div className='grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-56 overflow-y-auto p-3 border border-gray-200 dark:border-gray-700 rounded-lg'>
+          <div className='grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 max-h-56 overflow-y-auto p-3 border border-gray-200 dark:border-gray-700 rounded-lg'>
             {enabledSources.map((s) => (
               <label
                 key={s.key}
