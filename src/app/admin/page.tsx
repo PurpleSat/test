@@ -28,6 +28,7 @@ import Swal from 'sweetalert2';
 
 import { AdminConfig, AdminConfigResult } from '@/lib/admin.types';
 import { getAuthInfoFromBrowserCookie } from '@/lib/auth';
+import { resolveGroups } from '@/lib/user-groups';
 
 import PageLayout from '@/components/PageLayout';
 
@@ -262,12 +263,12 @@ const UserConfig = ({ config, role, refreshConfig }: UserConfigProps) => {
     }
   };
 
-  const handleSetUserGroup = async (targetUsername: string, group: 'A' | 'B') => {
+  const handleSetUserGroup = async (targetUsername: string, groupId: string) => {
     try {
       const res = await fetch('/api/admin/group', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'setUserGroup', targetUsername, group }),
+        body: JSON.stringify({ action: 'setUserGroup', targetUsername, groupId }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -563,33 +564,40 @@ const UserConfig = ({ config, role, refreshConfig }: UserConfigProps) => {
                           </span>
                         </td>
                         <td className='px-6 py-4 whitespace-nowrap'>
-                          {user.role === 'owner' || role !== 'owner' ? (
-                            <span
-                              className={`px-2 py-1 text-xs rounded-full ${
-                                (user.role === 'owner' || (user.group ?? 'A') === 'A')
-                                  ? 'bg-blue-100 dark:bg-blue-900/20 text-blue-800 dark:text-blue-300'
-                                  : 'bg-orange-100 dark:bg-orange-900/20 text-orange-800 dark:text-orange-300'
-                              }`}
-                            >
-                              {user.role === 'owner' || (user.group ?? 'A') === 'A'
-                                ? 'A 组'
-                                : 'B 组'}
-                            </span>
-                          ) : (
-                            <select
-                              value={user.group ?? 'A'}
-                              onChange={(e) =>
-                                handleSetUserGroup(
-                                  user.username,
-                                  e.target.value as 'A' | 'B'
-                                )
-                              }
-                              className='px-2 py-1 text-xs rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100'
-                            >
-                              <option value='A'>A 组</option>
-                              <option value='B'>B 组</option>
-                            </select>
-                          )}
+                          {(() => {
+                            const rg = resolveGroups(config);
+                            const badge = (text: string, cls: string) => (
+                              <span className={`px-2 py-1 text-xs rounded-full ${cls}`}>
+                                {text}
+                              </span>
+                            );
+                            if (user.role === 'owner')
+                              return badge('不受限', 'bg-yellow-100 dark:bg-yellow-900/20 text-yellow-800 dark:text-yellow-300');
+                            if (!rg.configured)
+                              return badge('未启用', 'bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400');
+                            const cur = rg.groups.find((g) => g.id === user.group);
+                            if (role !== 'owner')
+                              return badge(
+                                cur ? cur.name : '默认分组',
+                                'bg-blue-100 dark:bg-blue-900/20 text-blue-800 dark:text-blue-300'
+                              );
+                            return (
+                              <select
+                                value={cur ? cur.id : ''}
+                                onChange={(e) =>
+                                  e.target.value && handleSetUserGroup(user.username, e.target.value)
+                                }
+                                className='px-2 py-1 text-xs rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 max-w-[10rem]'
+                              >
+                                {!cur && <option value=''>（未分组，按默认）</option>}
+                                {rg.groups.map((g) => (
+                                  <option key={g.id} value={g.id}>
+                                    {g.name}
+                                  </option>
+                                ))}
+                              </select>
+                            );
+                          })()}
                         </td>
                         <td className='px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-2'>
                           {/* 修改密码按钮 */}
@@ -668,6 +676,245 @@ const UserConfig = ({ config, role, refreshConfig }: UserConfigProps) => {
 };
 
 // 用户分组与资源站权限配置（仅站长）
+const callGroupApi = async (payload: Record<string, unknown>) => {
+  const res = await fetch('/api/admin/group', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `操作失败: ${res.status}`);
+  }
+};
+
+interface GroupEditorProps {
+  group: { id: string; name: string; allSources: boolean; sourceKeys: string[] };
+  isDefault: boolean;
+  memberCount: number;
+  enabledSources: AdminConfig['SourceConfig'];
+  otherGroups: { id: string; name: string }[];
+  onChanged: () => Promise<void>;
+}
+
+const GroupEditor = ({
+  group,
+  isDefault,
+  memberCount,
+  enabledSources,
+  otherGroups,
+  onChanged,
+}: GroupEditorProps) => {
+  const [name, setName] = useState(group.name);
+  const [allSources, setAllSources] = useState(group.allSources);
+  const [selected, setSelected] = useState<string[]>(group.sourceKeys);
+  const [busy, setBusy] = useState(false);
+
+  // 服务端数据刷新后同步草稿
+  useEffect(() => {
+    setName(group.name);
+    setAllSources(group.allSources);
+    setSelected(group.sourceKeys);
+    // 只在该分组的内容真正变化时同步，避免其它分组保存导致的刷新冲掉这里未保存的草稿
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [group.id, group.name, group.allSources, group.sourceKeys.join('|')]);
+
+  const enabledKeys = new Set(enabledSources.map((s) => s.key));
+  const effectiveSelected = selected.filter((k) => enabledKeys.has(k));
+  const dirty =
+    name.trim() !== group.name ||
+    allSources !== group.allSources ||
+    (!allSources &&
+      (effectiveSelected.length !== group.sourceKeys.filter((k) => enabledKeys.has(k)).length ||
+        effectiveSelected.some((k) => !group.sourceKeys.includes(k))));
+
+  const run = async (fn: () => Promise<void>, okMsg?: string) => {
+    setBusy(true);
+    try {
+      await fn();
+      if (okMsg) showSuccess(okMsg);
+      await onChanged();
+    } catch (err) {
+      showError(err instanceof Error ? err.message : '操作失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const save = async () => {
+    if (!allSources && effectiveSelected.length === 0) {
+      const r = await Swal.fire({
+        icon: 'warning',
+        title: '该分组将无法访问任何资源站',
+        text: '组内用户将搜索不到任何内容，确定保存吗？',
+        showCancelButton: true,
+        confirmButtonText: '确定保存',
+        cancelButtonText: '取消',
+      });
+      if (!r.isConfirmed) return;
+    }
+    await run(
+      () =>
+        callGroupApi({
+          action: 'updateGroup',
+          id: group.id,
+          name,
+          allSources,
+          // 已被禁用 / 已删除的源不再写入，保持列表干净
+          sourceKeys: effectiveSelected,
+        }),
+      '分组已保存'
+    );
+  };
+
+  const remove = async () => {
+    let moveToGroupId: string | undefined;
+    if (memberCount > 0 || isDefault) {
+      const options: Record<string, string> = {};
+      otherGroups.forEach((g) => (options[g.id] = g.name));
+      const r = await Swal.fire({
+        icon: 'warning',
+        title: `删除分组「${group.name}」`,
+        text: `该分组有 ${memberCount} 名用户${isDefault ? '，且是默认注册分组' : ''}，请选择他们迁移到哪个分组：`,
+        input: 'select',
+        inputOptions: options,
+        inputPlaceholder: '选择迁移目标分组',
+        showCancelButton: true,
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+        inputValidator: (v) => (v ? undefined : '请选择迁移目标分组'),
+      });
+      if (!r.isConfirmed) return;
+      moveToGroupId = r.value as string;
+    } else {
+      const r = await Swal.fire({
+        icon: 'warning',
+        title: `删除分组「${group.name}」？`,
+        showCancelButton: true,
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+      });
+      if (!r.isConfirmed) return;
+    }
+    await run(
+      () => callGroupApi({ action: 'deleteGroup', id: group.id, moveToGroupId }),
+      '分组已删除'
+    );
+  };
+
+  return (
+    <div className='border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-3'>
+      <div className='flex flex-wrap items-center gap-2'>
+        <input
+          value={name}
+          maxLength={20}
+          onChange={(e) => setName(e.target.value)}
+          className='px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 w-48'
+          aria-label='分组名称'
+        />
+        <span className='text-xs text-gray-500 dark:text-gray-400'>{memberCount} 名用户</span>
+        {isDefault ? (
+          <span className='px-2 py-0.5 text-xs rounded-full bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300'>
+            默认注册分组
+          </span>
+        ) : (
+          <button
+            type='button'
+            disabled={busy}
+            onClick={() =>
+              run(() => callGroupApi({ action: 'setDefaultGroup', id: group.id }), '已设为默认注册分组')
+            }
+            className='px-2 py-0.5 text-xs rounded-full bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600'
+          >
+            设为默认注册分组
+          </button>
+        )}
+        <div className='ml-auto space-x-2'>
+          <button
+            type='button'
+            onClick={save}
+            disabled={busy || !dirty || !name.trim()}
+            className='px-3 py-1.5 text-sm bg-green-600 hover:bg-green-700 disabled:opacity-40 text-white rounded-lg'
+          >
+            保存
+          </button>
+          <button
+            type='button'
+            onClick={remove}
+            disabled={busy || otherGroups.length === 0}
+            title={otherGroups.length === 0 ? '至少保留一个分组' : undefined}
+            className='px-3 py-1.5 text-sm bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white rounded-lg'
+          >
+            删除
+          </button>
+        </div>
+      </div>
+
+      <label className='flex items-center gap-2 text-sm text-gray-800 dark:text-gray-200 cursor-pointer'>
+        <input
+          type='checkbox'
+          checked={allSources}
+          onChange={(e) => setAllSources(e.target.checked)}
+        />
+        可访问全部已启用的资源站（包含以后新增的）
+      </label>
+
+      {!allSources && (
+        <div>
+          <div className='flex items-center justify-between mb-1'>
+            <span className='text-sm text-gray-700 dark:text-gray-300'>
+              可访问的资源站（已选 {effectiveSelected.length} / {enabledSources.length}）
+            </span>
+            <div className='space-x-2 text-xs'>
+              <button
+                type='button'
+                onClick={() => setSelected(enabledSources.map((s) => s.key))}
+                className='px-2 py-1 rounded bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600'
+              >
+                全选
+              </button>
+              <button
+                type='button'
+                onClick={() => setSelected([])}
+                className='px-2 py-1 rounded bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600'
+              >
+                清空
+              </button>
+            </div>
+          </div>
+          <div className='grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-56 overflow-y-auto p-3 border border-gray-200 dark:border-gray-700 rounded-lg'>
+            {enabledSources.map((s) => (
+              <label
+                key={s.key}
+                className='flex items-center gap-2 text-sm text-gray-800 dark:text-gray-200 cursor-pointer'
+              >
+                <input
+                  type='checkbox'
+                  checked={selected.includes(s.key)}
+                  onChange={() =>
+                    setSelected((prev) =>
+                      prev.includes(s.key) ? prev.filter((k) => k !== s.key) : [...prev, s.key]
+                    )
+                  }
+                />
+                <span className='truncate'>{s.name}</span>
+                {s.from === 'custom' && (
+                  <span className='text-[10px] px-1 rounded bg-gray-100 dark:bg-gray-700 text-gray-500'>
+                    自定义
+                  </span>
+                )}
+              </label>
+            ))}
+            {enabledSources.length === 0 && (
+              <span className='text-sm text-gray-500'>暂无已启用的资源站</span>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const GroupPermissionConfig = ({
   config,
   refreshConfig,
@@ -675,68 +922,46 @@ const GroupPermissionConfig = ({
   config: AdminConfig | null;
   refreshConfig: () => Promise<void>;
 }) => {
-  const [defaultGroup, setDefaultGroup] = useState<'A' | 'B'>('B');
-  const [selected, setSelected] = useState<string[]>([]);
-  const [saving, setSaving] = useState(false);
-
-  const enabledSources = (config?.SourceConfig || []).filter((s) => !s.disabled);
-  const configured = Boolean(config?.GroupConfig);
-
-  useEffect(() => {
-    if (!config) return;
-    const enabledKeys = (config.SourceConfig || [])
-      .filter((s) => !s.disabled)
-      .map((s) => s.key);
-    if (config.GroupConfig) {
-      setDefaultGroup(config.GroupConfig.DefaultRegisterGroup);
-      const allowed = new Set(config.GroupConfig.GroupBSourceKeys);
-      setSelected(enabledKeys.filter((k) => allowed.has(k)));
-    } else {
-      setDefaultGroup('B');
-      setSelected(enabledKeys); // 未配置时 B 组等同可访问全部，作为编辑起点
-    }
-  }, [config]);
+  const [newName, setNewName] = useState('');
+  const [busy, setBusy] = useState(false);
 
   if (!config) return null;
+  const rg = resolveGroups(config);
+  const enabledSources = (config.SourceConfig || []).filter((s) => !s.disabled);
+  const countMembers = (id: string) =>
+    config.UserConfig.Users.filter(
+      (u) => u.role !== 'owner' && (u.group === id || (!rg.groups.some((g) => g.id === u.group) && rg.defaultId === id))
+    ).length;
 
-  const toggle = (key: string) =>
-    setSelected((prev) =>
-      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
-    );
-
-  const save = async () => {
-    if (selected.length === 0) {
-      const r = await Swal.fire({
-        icon: 'warning',
-        title: 'B 组将无法访问任何资源站',
-        text: '这样 B 组用户搜索不到任何内容，确定要保存吗？',
-        showCancelButton: true,
-        confirmButtonText: '确定保存',
-        cancelButtonText: '取消',
-      });
-      if (!r.isConfirmed) return;
-    }
-    setSaving(true);
+  const enable = async () => {
+    setBusy(true);
     try {
-      const res = await fetch('/api/admin/group', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'setGroupConfig',
-          defaultRegisterGroup: defaultGroup,
-          groupBSourceKeys: selected,
-        }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || `保存失败: ${res.status}`);
-      }
-      showSuccess('分组配置已保存');
+      await callGroupApi({ action: 'enableGroups' });
+      showSuccess('已启用分组功能');
       await refreshConfig();
     } catch (err) {
-      showError(err instanceof Error ? err.message : '保存失败');
+      showError(err instanceof Error ? err.message : '操作失败');
     } finally {
-      setSaving(false);
+      setBusy(false);
+    }
+  };
+
+  const create = async () => {
+    setBusy(true);
+    try {
+      await callGroupApi({
+        action: 'createGroup',
+        name: newName,
+        allSources: false,
+        sourceKeys: [],
+      });
+      setNewName('');
+      showSuccess('分组已创建，请为它勾选可访问的资源站');
+      await refreshConfig();
+    } catch (err) {
+      showError(err instanceof Error ? err.message : '操作失败');
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -744,95 +969,62 @@ const GroupPermissionConfig = ({
     <div className='space-y-5'>
       <div className='text-sm text-gray-600 dark:text-gray-400 space-y-1'>
         <p>
-          <b>A 组</b>：可访问全部已启用的资源站（含自行添加的源），为最高权限；站长恒为 A 组。
+          可自由创建、重命名、删除分组，并为每个分组自由选择可访问的资源站（或勾选“全部”）。站长不受分组限制。
         </p>
         <p>
-          <b>B 组</b>：只能访问下方勾选的资源站。被「视频源配置」禁用的源对所有分组都不可用。
+          被「视频源配置」禁用的源对所有分组都不可用；新增的资源站只对勾选了“全部”的分组自动可用，其余分组需手动勾选。修改立即生效。
         </p>
-        <p>修改立即生效；用户所属分组可在「用户配置」列表中逐个调整。</p>
+        <p>每个用户所属分组可在「用户配置」列表中逐个调整；新注册 / 后台新增的用户进入「默认注册分组」。</p>
       </div>
 
-      {!configured && (
-        <div className='p-3 rounded-lg bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 text-sm text-yellow-800 dark:text-yellow-300'>
-          尚未保存过分组配置：当前 B 组可访问全部已启用的资源站（不受限制），升级前的老用户均为 A 组。
-          点击下方「保存分组配置」后，B 组才会被限制为所勾选的资源站。
+      {!rg.configured ? (
+        <div className='p-4 rounded-lg bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 space-y-3'>
+          <p className='text-sm text-yellow-800 dark:text-yellow-300'>
+            尚未启用分组：当前所有用户都可访问全部已启用的资源站。点击启用后会创建两个初始分组——
+            <b>A 组</b>（全部资源站）和 <b>B 组</b>（暂含当前全部资源站，默认注册分组），已有用户归入 A 组，权限保持不变；之后你可以自由增删改。
+          </p>
+          <button
+            onClick={enable}
+            disabled={busy}
+            className='px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white rounded-lg'
+          >
+            启用分组功能
+          </button>
         </div>
-      )}
+      ) : (
+        <>
+          <div className='space-y-3'>
+            {rg.groups.map((g) => (
+              <GroupEditor
+                key={g.id}
+                group={g}
+                isDefault={rg.defaultId === g.id}
+                memberCount={countMembers(g.id)}
+                enabledSources={enabledSources}
+                otherGroups={rg.groups.filter((x) => x.id !== g.id)}
+                onChanged={refreshConfig}
+              />
+            ))}
+          </div>
 
-      <div>
-        <label className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'>
-          新注册用户默认分组
-        </label>
-        <select
-          value={defaultGroup}
-          onChange={(e) => setDefaultGroup(e.target.value as 'A' | 'B')}
-          className='px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100'
-        >
-          <option value='B'>B 组（推荐）</option>
-          <option value='A'>A 组</option>
-        </select>
-        <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
-          只影响之后注册 / 后台新增的用户，不会改变已有用户的分组。
-        </p>
-      </div>
-
-      <div>
-        <div className='flex items-center justify-between mb-2'>
-          <label className='text-sm font-medium text-gray-700 dark:text-gray-300'>
-            B 组可访问的资源站（已选 {selected.length} / {enabledSources.length}）
-          </label>
-          <div className='space-x-2 text-xs'>
+          <div className='flex flex-wrap items-center gap-2'>
+            <input
+              value={newName}
+              maxLength={20}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder='新分组名称（最多 20 个字符）'
+              className='px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 w-64'
+            />
             <button
-              type='button'
-              onClick={() => setSelected(enabledSources.map((s) => s.key))}
-              className='px-2 py-1 rounded bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600'
+              onClick={create}
+              disabled={busy || !newName.trim()}
+              className='px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white rounded-lg'
             >
-              全选
-            </button>
-            <button
-              type='button'
-              onClick={() => setSelected([])}
-              className='px-2 py-1 rounded bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600'
-            >
-              清空
+              新建分组
             </button>
           </div>
-        </div>
-        <div className='grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-64 overflow-y-auto p-3 border border-gray-200 dark:border-gray-700 rounded-lg'>
-          {enabledSources.map((s) => (
-            <label
-              key={s.key}
-              className='flex items-center gap-2 text-sm text-gray-800 dark:text-gray-200 cursor-pointer'
-            >
-              <input
-                type='checkbox'
-                checked={selected.includes(s.key)}
-                onChange={() => toggle(s.key)}
-              />
-              <span className='truncate'>{s.name}</span>
-              {s.from === 'custom' && (
-                <span className='text-[10px] px-1 rounded bg-gray-100 dark:bg-gray-700 text-gray-500'>
-                  自定义
-                </span>
-              )}
-            </label>
-          ))}
-          {enabledSources.length === 0 && (
-            <span className='text-sm text-gray-500'>暂无已启用的资源站</span>
-          )}
-        </div>
-        <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
-          之后新增的资源站不会自动对 B 组开放，需在此勾选；A 组则自动可用。
-        </p>
-      </div>
-
-      <button
-        onClick={save}
-        disabled={saving}
-        className='px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white rounded-lg transition-colors'
-      >
-        {saving ? '保存中...' : '保存分组配置'}
-      </button>
+        </>
+      )}
     </div>
   );
 };

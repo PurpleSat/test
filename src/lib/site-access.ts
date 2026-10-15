@@ -7,7 +7,7 @@ import { ApiSite, getAvailableApiSites, getConfig } from '@/lib/config';
 import { getSitesForUser } from '@/lib/user-groups';
 
 export type AccessResult =
-  | { ok: true; sites: ApiSite[]; username: string | null; group: 'A' | 'B' }
+  | { ok: true; sites: ApiSite[]; username: string | null; group: string | null }
   | { ok: false; response: NextResponse };
 
 /**
@@ -25,7 +25,7 @@ export async function resolveAccessibleSites(
       ok: true,
       sites: await getAvailableApiSites(),
       username: null,
-      group: 'A',
+      group: null,
     };
   }
 

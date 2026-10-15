@@ -1,12 +1,16 @@
 /** @jest-environment node */
-import type { AdminConfig } from '../admin.types';
+import type { AdminConfig, UserGroupDef } from '../admin.types';
 import {
-  filterSitesByGroup,
+  filterSitesByGroupDef,
   getDefaultRegisterGroup,
   getDiscoveredUserGroup,
   getSitesForUser,
-  getUserGroup,
+  getUserGroupDef,
+  migrateGroupConfig,
+  removeSourceKeyFromGroups,
+  resolveGroups,
   sanitizeSourceKeys,
+  validateGroupName,
 } from '../user-groups';
 
 const src = (key: string, extra: Partial<AdminConfig['SourceConfig'][number]> = {}) => ({
@@ -15,6 +19,13 @@ const src = (key: string, extra: Partial<AdminConfig['SourceConfig'][number]> = 
   api: `https://${key}.example/api`,
   from: 'config' as const,
   ...extra,
+});
+
+const G = (id: string, name: string, allSources: boolean, sourceKeys: string[] = []): UserGroupDef => ({
+  id,
+  name,
+  allSources,
+  sourceKeys,
 });
 
 const base = (): AdminConfig => ({
@@ -29,91 +40,131 @@ const base = (): AdminConfig => ({
     AllowRegister: true,
     Users: [
       { username: 'boss', role: 'owner' },
-      { username: 'old', role: 'user' }, // 升级前的老用户：无 group
-      { username: 'a1', role: 'user', group: 'A' },
-      { username: 'b1', role: 'user', group: 'B' },
-      { username: 'adm', role: 'admin', group: 'B' },
+      { username: 'old', role: 'user' }, // 无分组
+      { username: 'vip', role: 'user', group: 'g_vip' },
+      { username: 'basic', role: 'user', group: 'g_basic' },
+      { username: 'lost', role: 'user', group: 'g_deleted' }, // 分组已不存在
+      { username: 'adm', role: 'admin', group: 'g_basic' },
     ],
   },
   SourceConfig: [src('s1'), src('s2'), src('s3', { from: 'custom' }), src('off', { disabled: true })],
 });
 
-describe('user groups', () => {
-  it('站长恒为 A 组，老用户（无 group）为 A 组', () => {
+const withGroups = (c: AdminConfig) => {
+  c.GroupConfig = {
+    Groups: [G('g_vip', 'VIP', true), G('g_basic', '基础', false, ['s1', 'off', 'gone']), G('g_none', '空', false, [])],
+    DefaultRegisterGroupId: 'g_basic',
+  };
+  return c;
+};
+const keys = (r: { key: string }[]) => r.map((s) => s.key);
+
+describe('custom user groups', () => {
+  it('未启用分组：所有人（含无分组用户）可访问全部已启用源', () => {
     const c = base();
-    expect(getUserGroup(c, 'boss', 'boss')).toBe('A');
-    expect(getUserGroup(c, 'old', 'boss')).toBe('A');
-    expect(getUserGroup(c, 'b1', 'boss')).toBe('B');
+    expect(getUserGroupDef(c, 'basic', 'boss')).toBeNull();
+    expect(keys(getSitesForUser(c, 'basic').sites)).toEqual(['s1', 's2', 's3']);
   });
 
-  it('未知 / 无身份用户取最小权限 B 组', () => {
-    const c = base();
-    expect(getUserGroup(c, 'ghost', 'boss')).toBe('B');
-    expect(getUserGroup(c, null, 'boss')).toBe('B');
+  it('站长不受分组限制', () => {
+    const c = withGroups(base());
+    expect(getUserGroupDef(c, 'boss', 'boss')).toBeNull();
+    c.UserConfig.Users[0].group = 'g_none'; // 即使被篡改
+    expect(getUserGroupDef(c, 'boss', 'boss')).toBeNull();
   });
 
-  it('站长即使被篡改成 B 也按 A 处理', () => {
-    const c = base();
-    c.UserConfig.Users[0].group = 'B';
-    expect(getUserGroup(c, 'boss', 'boss')).toBe('A');
-  });
-
-  it('A 组：全部已启用源（含自定义），被禁用的除外', () => {
-    const c = base();
-    c.GroupConfig = { DefaultRegisterGroup: 'B', GroupBSourceKeys: ['s1'] };
-    expect(filterSitesByGroup(c, 'A').map((s) => s.key)).toEqual(['s1', 's2', 's3']);
-  });
-
-  it('B 组：只有站长指定且已启用的源；陈旧 / 被禁用的 key 被忽略', () => {
-    const c = base();
-    c.GroupConfig = { DefaultRegisterGroup: 'B', GroupBSourceKeys: ['s1', 'off', 'gone'] };
-    expect(filterSitesByGroup(c, 'B').map((s) => s.key)).toEqual(['s1']);
-  });
-
-  it('B 组指定为空列表 → 无任何资源站', () => {
-    const c = base();
-    c.GroupConfig = { DefaultRegisterGroup: 'B', GroupBSourceKeys: [] };
-    expect(filterSitesByGroup(c, 'B')).toEqual([]);
-  });
-
-  it('未启用分组配置时 B 组暂时等同全部已启用源（升级后行为不变）', () => {
-    const c = base();
-    expect(filterSitesByGroup(c, 'B').map((s) => s.key)).toEqual(['s1', 's2', 's3']);
-  });
-
-  it('后新增的源不会自动开放给 B 组，但 A 组可用', () => {
-    const c = base();
-    c.GroupConfig = { DefaultRegisterGroup: 'B', GroupBSourceKeys: ['s1'] };
+  it('全部源分组包含以后新增的源；被禁用的源除外', () => {
+    const c = withGroups(base());
     c.SourceConfig.push(src('new1', { from: 'custom' }));
-    expect(filterSitesByGroup(c, 'B').map((s) => s.key)).toEqual(['s1']);
-    expect(filterSitesByGroup(c, 'A').map((s) => s.key)).toContain('new1');
+    const def = getUserGroupDef(c, 'vip', 'boss');
+    expect(keys(filterSitesByGroupDef(c, def))).toEqual(['s1', 's2', 's3', 'new1']);
   });
 
-  it('getSitesForUser 不暴露多余字段且按分组过滤', () => {
+  it('指定源分组：只含勾选且已启用的源，陈旧 / 被禁用 key 被忽略', () => {
+    const c = withGroups(base());
+    expect(keys(filterSitesByGroupDef(c, getUserGroupDef(c, 'basic', 'boss')))).toEqual(['s1']);
+  });
+
+  it('空列表分组 → 无任何资源站', () => {
+    const c = withGroups(base());
+    expect(filterSitesByGroupDef(c, c.GroupConfig!.Groups![2])).toEqual([]);
+  });
+
+  it('后新增的源不会自动开放给指定源分组', () => {
+    const c = withGroups(base());
+    c.SourceConfig.push(src('new1'));
+    expect(keys(filterSitesByGroupDef(c, getUserGroupDef(c, 'basic', 'boss')))).toEqual(['s1']);
+  });
+
+  it('用户所属分组已不存在 / 无分组 → 回退默认注册分组，不越权', () => {
+    const c = withGroups(base());
+    expect(getUserGroupDef(c, 'lost', 'boss')?.id).toBe('g_basic');
+    expect(getUserGroupDef(c, 'old', 'boss')?.id).toBe('g_basic');
+    expect(getUserGroupDef(c, 'ghost', 'boss')?.id).toBe('g_basic');
+    expect(getUserGroupDef(c, null, 'boss')?.id).toBe('g_basic');
+  });
+
+  it('分组被清空时回退为空权限，而不是全部权限', () => {
     const c = base();
-    c.GroupConfig = { DefaultRegisterGroup: 'B', GroupBSourceKeys: ['s2'] };
-    const r = getSitesForUser(c, 'b1');
-    expect(r.group).toBe('B');
-    expect(r.sites.map((s) => s.key)).toEqual(['s2']);
+    c.GroupConfig = { Groups: [], DefaultRegisterGroupId: 'x' };
+    expect(getSitesForUser(c, 'basic').sites).toEqual([]);
+  });
+
+  it('getSitesForUser 只暴露必要字段', () => {
+    const c = withGroups(base());
+    const r = getSitesForUser(c, 'basic');
+    expect(r.group).toBe('g_basic');
     expect(Object.keys(r.sites[0]).sort()).toEqual(['api', 'detail', 'key', 'name']);
   });
 
-  it('默认注册分组缺省为 B；发现型用户在未启用分组配置时为 A', () => {
+  it('旧格式（固定 A/B）自动迁移，保持原有语义与 id', () => {
     const c = base();
-    expect(getDefaultRegisterGroup(c)).toBe('B');
-    expect(getDiscoveredUserGroup(c)).toBe('A');
-    c.GroupConfig = { DefaultRegisterGroup: 'B', GroupBSourceKeys: [] };
-    expect(getDiscoveredUserGroup(c)).toBe('B');
-    c.GroupConfig.DefaultRegisterGroup = 'A';
-    expect(getDiscoveredUserGroup(c)).toBe('A');
+    c.GroupConfig = { DefaultRegisterGroup: 'B', GroupBSourceKeys: ['s2'] };
+    const r = resolveGroups(c);
+    expect(r.groups.map((g) => [g.id, g.allSources])).toEqual([['A', true], ['B', false]]);
+    expect(r.defaultId).toBe('B');
+    c.UserConfig.Users.push({ username: 'oldb', role: 'user', group: 'B' });
+    expect(keys(getSitesForUser(c, 'oldb', ).sites)).toEqual(['s2']);
+    const m = migrateGroupConfig(c)!;
+    expect(m.Groups).toHaveLength(2);
+    expect(m.DefaultRegisterGroupId).toBe('B');
+    expect(m.GroupBSourceKeys).toBeUndefined();
   });
 
-  it('sanitizeSourceKeys：去重；含未知 key / 非数组 / 非字符串则拒绝', () => {
+  it('默认注册分组 / 发现型用户分组', () => {
+    const c = base();
+    expect(getDefaultRegisterGroup(c)).toBe('B'); // 未配置时的新注册默认
+    expect(getDiscoveredUserGroup(c)).toBe('A'); // 未配置：老用户不受限
+    withGroups(c);
+    expect(getDefaultRegisterGroup(c)).toBe('g_basic');
+    expect(getDiscoveredUserGroup(c)).toBe('g_basic');
+    c.GroupConfig!.DefaultRegisterGroupId = 'missing'; // 默认分组 id 失效 → 取第一个分组
+    expect(getDefaultRegisterGroup(c)).toBe('g_vip');
+  });
+
+  it('removeSourceKeyFromGroups 清理引用，避免同名源日后“复活”权限', () => {
+    const c = withGroups(base());
+    removeSourceKeyFromGroups(c, 's1');
+    expect(c.GroupConfig!.Groups![1].sourceKeys).toEqual(['off', 'gone']);
+  });
+
+  it('sanitizeSourceKeys：去重；未知 key / 非数组 / 非字符串拒绝', () => {
     const c = base();
     expect(sanitizeSourceKeys(c, ['s1', 's1', 's2'])).toEqual(['s1', 's2']);
     expect(sanitizeSourceKeys(c, ['s1', 'nope'])).toBeNull();
     expect(sanitizeSourceKeys(c, 's1')).toBeNull();
     expect(sanitizeSourceKeys(c, [1])).toBeNull();
     expect(sanitizeSourceKeys(c, [])).toEqual([]);
+  });
+
+  it('validateGroupName：长度、控制字符、重名（不区分大小写与首尾空格）', () => {
+    const groups = [G('1', 'VIP', true), G('2', '基础', false)];
+    expect(validateGroupName('  白金 ', groups)).toEqual({ ok: true, name: '白金' });
+    expect(validateGroupName('', groups).ok).toBe(false);
+    expect(validateGroupName('x'.repeat(21), groups).ok).toBe(false);
+    expect(validateGroupName('a\u0000b', groups).ok).toBe(false);
+    expect(validateGroupName('vip', groups).ok).toBe(false);
+    expect(validateGroupName('VIP', groups, '1').ok).toBe(true); // 自己改名保持不变
+    expect(validateGroupName(123, groups).ok).toBe(false);
   });
 });
