@@ -190,3 +190,49 @@ export function removeSourceKeyFromGroups(config: AdminConfig, key: string): voi
   });
   config.GroupConfig = migrated;
 }
+
+// ---------------------------------------------------------------------------
+// 防止管理员借“改密码 / 新建用户”接管权限更高的账号（越权到更高分组）
+// 规则：非站长的管理员，只能为“可访问资源站不超过自己”的账号设置密码。
+// ---------------------------------------------------------------------------
+
+function enabledKeysFor(config: AdminConfig, def: UserGroupDef | null): Set<string> {
+  return new Set(filterSitesByGroupDef<SiteLike>(config, def).map((s) => s.key));
+}
+
+function isSubset(sub: Set<string>, sup: Set<string>): boolean {
+  for (const k of Array.from(sub)) if (!sup.has(k)) return false;
+  return true;
+}
+
+/** 管理员是否可以持有（修改密码 / 登录）目标用户的账号：目标可访问的资源站必须是管理员自己的子集 */
+export function adminMayTakeOverAccount(
+  config: AdminConfig,
+  adminUsername: string,
+  targetUsername: string,
+  ownerUsername: string | undefined = process.env.USERNAME
+): boolean {
+  if (adminUsername === ownerUsername) return true;
+  if (adminUsername === targetUsername) return true;
+  return isSubset(
+    enabledKeysFor(config, getUserGroupDef(config, targetUsername, ownerUsername)),
+    enabledKeysFor(config, getUserGroupDef(config, adminUsername, ownerUsername))
+  );
+}
+
+/** 管理员新建的用户会进入默认注册分组，该分组的权限不能超过管理员自己 */
+export function adminMayCreateUserInDefaultGroup(
+  config: AdminConfig,
+  adminUsername: string,
+  ownerUsername: string | undefined = process.env.USERNAME
+): boolean {
+  if (adminUsername === ownerUsername) return true;
+  const r = resolveGroups(config);
+  if (!r.configured) return true;
+  const def = r.groups.find((g) => g.id === r.defaultId) ?? null;
+  const target = def ?? { id: '', name: '', allSources: false, sourceKeys: [] };
+  return isSubset(
+    enabledKeysFor(config, target),
+    enabledKeysFor(config, getUserGroupDef(config, adminUsername, ownerUsername))
+  );
+}

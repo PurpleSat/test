@@ -2,6 +2,8 @@
 import type { AdminConfig, UserGroupDef } from '../admin.types';
 import {
   filterSitesByGroupDef,
+  adminMayCreateUserInDefaultGroup,
+  adminMayTakeOverAccount,
   getDefaultRegisterGroup,
   getDiscoveredUserGroup,
   getSitesForUser,
@@ -166,5 +168,40 @@ describe('custom user groups', () => {
     expect(validateGroupName('vip', groups).ok).toBe(false);
     expect(validateGroupName('VIP', groups, '1').ok).toBe(true); // 自己改名保持不变
     expect(validateGroupName(123, groups).ok).toBe(false);
+  });
+
+  describe('管理员越权防护', () => {
+    // adm 在 g_basic（仅 s1）；vip 在 g_vip（全部）；lost 回退默认分组 g_basic
+    it('管理员不能接管权限更高的账号，可接管同级 / 更低 / 自己', () => {
+      const c = withGroups(base());
+      expect(adminMayTakeOverAccount(c, 'adm', 'vip', 'boss')).toBe(false);
+      expect(adminMayTakeOverAccount(c, 'adm', 'basic', 'boss')).toBe(true);
+      expect(adminMayTakeOverAccount(c, 'adm', 'adm', 'boss')).toBe(true);
+      expect(adminMayTakeOverAccount(c, 'adm', 'lost', 'boss')).toBe(true);
+      c.UserConfig.Users.push({ username: 'none', role: 'user', group: 'g_none' });
+      expect(adminMayTakeOverAccount(c, 'adm', 'none', 'boss')).toBe(true); // 更低
+    });
+
+    it('站长不受限；管理员在“全部源”分组时可接管任意用户', () => {
+      const c = withGroups(base());
+      expect(adminMayTakeOverAccount(c, 'boss', 'vip', 'boss')).toBe(true);
+      c.UserConfig.Users.find((u) => u.username === 'adm')!.group = 'g_vip';
+      expect(adminMayTakeOverAccount(c, 'adm', 'vip', 'boss')).toBe(true);
+      expect(adminMayTakeOverAccount(c, 'adm', 'basic', 'boss')).toBe(true);
+    });
+
+    it('未启用分组时不做限制', () => {
+      const c = base();
+      expect(adminMayTakeOverAccount(c, 'adm', 'vip', 'boss')).toBe(true);
+      expect(adminMayCreateUserInDefaultGroup(c, 'adm', 'boss')).toBe(true);
+    });
+
+    it('管理员新建用户：默认注册分组权限不能高于自己', () => {
+      const c = withGroups(base());
+      expect(adminMayCreateUserInDefaultGroup(c, 'adm', 'boss')).toBe(true); // 默认 g_basic = 自己
+      c.GroupConfig!.DefaultRegisterGroupId = 'g_vip';
+      expect(adminMayCreateUserInDefaultGroup(c, 'adm', 'boss')).toBe(false);
+      expect(adminMayCreateUserInDefaultGroup(c, 'boss', 'boss')).toBe(true);
+    });
   });
 });

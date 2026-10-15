@@ -8,7 +8,11 @@ import { getConfig, withConfigConflictRetry } from '@/lib/config';
 import { checkCsrf } from '@/lib/csrf-guard';
 import { getStorage } from '@/lib/db';
 import { IStorage } from '@/lib/types';
-import { getDefaultRegisterGroup } from '@/lib/user-groups';
+import {
+  adminMayCreateUserInDefaultGroup,
+  adminMayTakeOverAccount,
+  getDefaultRegisterGroup,
+} from '@/lib/user-groups';
 
 export const runtime = 'edge';
 
@@ -17,8 +21,6 @@ const ACTIONS = [
   'add',
   'ban',
   'unban',
-  'setAdmin',
-  'cancelAdmin',
   'setAllowRegister',
   'changePassword',
   'deleteUser',
@@ -72,6 +74,14 @@ export async function POST(request: NextRequest) {
       allowRegister?: boolean;
       action?: (typeof ACTIONS)[number];
     };
+
+    // 已取消“管理员”角色：后台仅站长可用
+    if ((action as string) === 'setAdmin' || (action as string) === 'cancelAdmin') {
+      return NextResponse.json(
+        { error: '已取消管理员角色：后台仅站长可管理' },
+        { status: 400 }
+      );
+    }
 
     if (!action || !ACTIONS.includes(action)) {
       return NextResponse.json({ error: '参数格式错误' }, { status: 400 });
@@ -163,6 +173,17 @@ export async function POST(request: NextRequest) {
               { status: 400 }
             );
           }
+          // 管理员知道新用户的密码，新用户落入默认注册分组；该分组权限不能高于管理员自己，
+          // 否则管理员可借新建账号获得更高分组的访问权限
+          if (!adminMayCreateUserInDefaultGroup(adminConfig, username)) {
+            return NextResponse.json(
+              {
+                error:
+                  '默认注册分组的资源站权限高于你，仅站长可新增用户（或请站长调整默认注册分组）',
+              },
+              { status: 403 }
+            );
+          }
           if (!storage || typeof storage.registerUser !== 'function') {
             return NextResponse.json(
               { error: '存储未配置用户注册' },
@@ -219,50 +240,6 @@ export async function POST(request: NextRequest) {
           targetEntry.banned = false;
           break;
         }
-        case 'setAdmin': {
-          if (!targetEntry) {
-            return NextResponse.json(
-              { error: '目标用户不存在' },
-              { status: 404 }
-            );
-          }
-          if (targetEntry.role === 'admin') {
-            return NextResponse.json(
-              { error: '该用户已是管理员' },
-              { status: 400 }
-            );
-          }
-          if (operatorRole !== 'owner') {
-            return NextResponse.json(
-              { error: '仅站长可设置管理员' },
-              { status: 401 }
-            );
-          }
-          targetEntry.role = 'admin';
-          break;
-        }
-        case 'cancelAdmin': {
-          if (!targetEntry) {
-            return NextResponse.json(
-              { error: '目标用户不存在' },
-              { status: 404 }
-            );
-          }
-          if (targetEntry.role !== 'admin') {
-            return NextResponse.json(
-              { error: '目标用户不是管理员' },
-              { status: 400 }
-            );
-          }
-          if (operatorRole !== 'owner') {
-            return NextResponse.json(
-              { error: '仅站长可取消管理员' },
-              { status: 401 }
-            );
-          }
-          targetEntry.role = 'user';
-          break;
-        }
         case 'changePassword': {
           if (!targetEntry) {
             return NextResponse.json(
@@ -290,6 +267,14 @@ export async function POST(request: NextRequest) {
             return NextResponse.json(
               { error: '仅站长可修改其他管理员密码' },
               { status: 401 }
+            );
+          }
+
+          // 管理员不能给“资源站权限高于自己”的用户改密码，否则可登录其账号越权
+          if (!adminMayTakeOverAccount(adminConfig, username, targetUsername!)) {
+            return NextResponse.json(
+              { error: '该用户的资源站权限高于你，仅站长可修改其密码' },
+              { status: 403 }
             );
           }
 

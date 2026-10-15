@@ -41,15 +41,13 @@ export async function getVerifiedAuthUser(
   }
 
   // 角色权限校验
-  if (options.requiredRole === 'owner') {
-    // 站长登录时下发的 Cookie 角色是 'admin'（站长身份由用户名与环境变量 USERNAME 判定），
-    // 此前这里要求 role === 'owner'，导致站长永远无法通过“仅站长”接口（如重置配置）。
-    // 签名已覆盖 username 与 role，因此用户名等于站长用户名且签名有效即可确认是站长。
+  // 本站只有站长一个管理者：'owner' 与 'admin' 要求等价，都必须是站长本人。
+  // 站长登录时下发的 Cookie 角色是 'admin'，站长身份以“用户名 === 环境变量 USERNAME”判定；
+  // 签名已覆盖 username 与 role，因此签名有效 + 用户名匹配即可确认是站长。
+  if (options.requiredRole === 'owner' || options.requiredRole === 'admin') {
     const ownerName = process.env.USERNAME;
     if (!ownerName || authInfo.username !== ownerName) return null;
     if (authInfo.role !== 'owner' && authInfo.role !== 'admin') return null;
-  } else if (options.requiredRole === 'admin') {
-    if (authInfo.role !== 'admin' && authInfo.role !== 'owner') return null;
   }
 
   // 封禁校验时顺带取到的配置，供调用方复用（避免 Vercel/Cloudflare 上重复读库）
