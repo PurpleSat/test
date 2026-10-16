@@ -179,6 +179,14 @@ const UserConfig = ({ config, role, refreshConfig }: UserConfigProps) => {
     await handleUserAction('unban', uname);
   };
 
+  const handleSetAdmin = async (uname: string) => {
+    await handleUserAction('setAdmin', uname);
+  };
+
+  const handleRemoveAdmin = async (uname: string) => {
+    await handleUserAction('cancelAdmin', uname);
+  };
+
   const handleAddUser = async () => {
     if (!newUser.username || !newUser.password) return;
     await handleUserAction('add', newUser.username, newUser.password);
@@ -225,6 +233,8 @@ const UserConfig = ({ config, role, refreshConfig }: UserConfigProps) => {
       | 'add'
       | 'ban'
       | 'unban'
+      | 'setAdmin'
+      | 'cancelAdmin'
       | 'changePassword'
       | 'deleteUser',
     targetUsername: string,
@@ -611,6 +621,24 @@ const UserConfig = ({ config, role, refreshConfig }: UserConfigProps) => {
                           {canOperate && (
                             <>
                               {/* 其他操作按钮 */}
+                              {user.role === 'user' && (
+                                <button
+                                  onClick={() => handleSetAdmin(user.username)}
+                                  className='inline-flex items-center px-3 py-1.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 hover:bg-purple-200 dark:bg-purple-900/40 dark:hover:bg-purple-900/60 dark:text-purple-200 transition-colors'
+                                >
+                                  设为管理
+                                </button>
+                              )}
+                              {user.role === 'admin' && (
+                                <button
+                                  onClick={() =>
+                                    handleRemoveAdmin(user.username)
+                                  }
+                                  className='inline-flex items-center px-3 py-1.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 hover:bg-gray-200 dark:bg-gray-700/40 dark:hover:bg-gray-700/60 dark:text-gray-200 transition-colors'
+                                >
+                                  取消管理
+                                </button>
+                              )}
                               {user.role !== 'owner' &&
                                 (!user.banned ? (
                                   <button

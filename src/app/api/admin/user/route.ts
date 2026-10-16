@@ -21,6 +21,8 @@ const ACTIONS = [
   'add',
   'ban',
   'unban',
+  'setAdmin',
+  'cancelAdmin',
   'setAllowRegister',
   'changePassword',
   'deleteUser',
@@ -74,14 +76,6 @@ export async function POST(request: NextRequest) {
       allowRegister?: boolean;
       action?: (typeof ACTIONS)[number];
     };
-
-    // 已取消“管理员”角色：后台仅站长可用
-    if ((action as string) === 'setAdmin' || (action as string) === 'cancelAdmin') {
-      return NextResponse.json(
-        { error: '已取消管理员角色：后台仅站长可管理' },
-        { status: 400 }
-      );
-    }
 
     if (!action || !ACTIONS.includes(action)) {
       return NextResponse.json({ error: '参数格式错误' }, { status: 400 });
@@ -238,6 +232,50 @@ export async function POST(request: NextRequest) {
             }
           }
           targetEntry.banned = false;
+          break;
+        }
+        case 'setAdmin': {
+          if (!targetEntry) {
+            return NextResponse.json(
+              { error: '目标用户不存在' },
+              { status: 404 }
+            );
+          }
+          if (targetEntry.role === 'admin') {
+            return NextResponse.json(
+              { error: '该用户已是管理员' },
+              { status: 400 }
+            );
+          }
+          if (operatorRole !== 'owner') {
+            return NextResponse.json(
+              { error: '仅站长可设置管理员' },
+              { status: 401 }
+            );
+          }
+          targetEntry.role = 'admin';
+          break;
+        }
+        case 'cancelAdmin': {
+          if (!targetEntry) {
+            return NextResponse.json(
+              { error: '目标用户不存在' },
+              { status: 404 }
+            );
+          }
+          if (targetEntry.role !== 'admin') {
+            return NextResponse.json(
+              { error: '目标用户不是管理员' },
+              { status: 400 }
+            );
+          }
+          if (operatorRole !== 'owner') {
+            return NextResponse.json(
+              { error: '仅站长可取消管理员' },
+              { status: 401 }
+            );
+          }
+          targetEntry.role = 'user';
           break;
         }
         case 'changePassword': {

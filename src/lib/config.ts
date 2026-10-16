@@ -110,10 +110,7 @@ function syncUsers(
   discoveredGroup: UserGroup = 'A'
 ): any[] {
   const userMap = new Map();
-  // 已取消“管理员”角色：历史数据里的 admin 一律视为普通用户
-  jsonUsers.forEach((u) =>
-    userMap.set(u.username, u.role === 'admin' ? { ...u, role: 'user' } : u)
-  );
+  jsonUsers.forEach((u) => userMap.set(u.username, u));
 
   const syncedUsers: any[] = [];
   const ownerUser = process.env.USERNAME;

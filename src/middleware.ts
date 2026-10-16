@@ -52,12 +52,7 @@ export async function middleware(request: NextRequest) {
   if (isValidSignature) {
     // ================= 严格越权访问拦截 =================
     if (isAdminPath) {
-      // 仅站长（用户名等于 USERNAME 且签名有效）可访问后台；不再存在其他“管理员”
-      const isOwner =
-        !!process.env.USERNAME &&
-        authInfo.username === process.env.USERNAME &&
-        (authInfo.role === 'admin' || authInfo.role === 'owner');
-      if (!isOwner) {
+      if (authInfo.role !== 'admin' && authInfo.role !== 'owner') {
         console.warn(`越权拦截: 普通用户 ${authInfo.username} 尝试访问后台 ${pathname}`);
         
         if (pathname.startsWith('/api/')) {
