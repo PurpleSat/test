@@ -126,9 +126,15 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: '用户被封禁' }, { status: 401 });
       }
 
+      // 会话角色必须以配置中的最新角色为准：被站长设置为管理员的用户，
+      // 登录时应下发 'admin' 角色（与站长 cookie 约定一致），否则 middleware
+      // 会因 cookie 角色为 'user' 而把其从 /admin 重定向回首页。
+      // 注意：getConfig 可能有进程内缓存，查不到时不做降级以外的假设。
+      const sessionRole = user && user.role === 'admin' ? 'admin' : 'user';
+
       const response = NextResponse.json({ ok: true });
-      const cookieValue = await buildAuthCookieValue(username, 'user');
-      setAuthCookies(response, req, cookieValue, username, 'user');
+      const cookieValue = await buildAuthCookieValue(username, sessionRole);
+      setAuthCookies(response, req, cookieValue, username, sessionRole);
 
       return response;
     } catch (err) {
