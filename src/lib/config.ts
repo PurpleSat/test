@@ -495,6 +495,9 @@ export async function persistNewUserGroup(
       const entry = config.UserConfig.Users.find((u) => u.username === username);
       if (entry) {
         if (entry.role === 'owner') return;
+        // 🛡️ 配置里可能残留“数据库中已不存在”的旧条目（如删除用户时配置写入失败）。
+        // 重新注册同名账号时必须按全新普通用户对待，不得继承旧条目的 admin 角色。
+        entry.role = 'user';
         entry.group = g;
       } else {
         config.UserConfig.Users.push({ username, role: 'user', group: g });

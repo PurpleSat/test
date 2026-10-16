@@ -13,6 +13,7 @@ import {
   adminMayTakeOverAccount,
   getDefaultRegisterGroup,
 } from '@/lib/user-groups';
+import { isUsernameTaken } from '@/lib/username';
 
 export const runtime = 'edge';
 
@@ -158,7 +159,14 @@ export async function POST(request: NextRequest) {
     } else {
       switch (action) {
         case 'add': {
-          if (targetEntry) {
+          if (
+            targetEntry ||
+            isUsernameTaken(
+              targetUsername!,
+              adminConfig.UserConfig.Users.map((u) => u.username),
+              process.env.USERNAME
+            )
+          ) {
             return NextResponse.json({ error: '用户已存在' }, { status: 400 });
           }
           if (!targetPassword) {

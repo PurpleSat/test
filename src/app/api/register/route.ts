@@ -4,6 +4,7 @@ import { z } from 'zod';
 
 import { getClientIp } from '@/lib/client-ip';
 import { getConfig, persistNewUserGroup } from '@/lib/config';
+import { isUsernameTaken } from '@/lib/username';
 import { buildAuthCookieValue, setAuthCookies } from '@/lib/cookies';
 import { db } from '@/lib/db';
 import { timingSafeEqual } from '@/lib/password';
@@ -118,7 +119,14 @@ export async function POST(req: NextRequest) {
     }
     // ================================================================
 
-    if (username === process.env.USERNAME) {
+    // 忽略大小写的唯一性：同时覆盖站长用户名与配置中同步的全部现有用户
+    if (
+      isUsernameTaken(
+        username,
+        config.UserConfig.Users.map((u) => u.username),
+        process.env.USERNAME
+      )
+    ) {
       return NextResponse.json({ error: '用户已存在' }, { status: 400 });
     }
 
